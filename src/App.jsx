@@ -1,17 +1,5 @@
-import { useState, useEffect } from "react";
-
-// ─── Seed Data ───────────────────────────────────────────────────────────────
-const SEED_USERS = [
-  { id: "u1", username: "giovanni", displayName: "Giovanni", password: "pass", score: 0, avatar: "\u{1F9D1}\u200D\u{1F4BB}", type: "user", controlledBy: null },
-  { id: "u2", username: "alex",     displayName: "Alex",     password: "pass", score: 0, avatar: "\u{1F338}", type: "user", controlledBy: null },
-  { id: "u3", username: "marc",     displayName: "Marc-Antoine", password: "pass", score: 0, avatar: "\u{1F3B8}", type: "user", controlledBy: null },
-  { id: "u4", username: "basil",    displayName: "Basil \u{1F43E}", password: null, score: 0, avatar: "\u{1F431}", type: "proxy", controlledBy: ["u1","u2"] },
-];
-const SEED_TXN = [];
-
-// ─── Storage Helpers ─────────────────────────────────────────────────────────
-const load = (k, def) => { try { return JSON.parse(localStorage.getItem(k)) ?? def; } catch { return def; } };
-const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+import { useState, useEffect, useCallback } from "react";
+import { api, getToken, setToken, clearToken, setAuthErrorHandler, mapUser, mapTxn } from "./api.js";
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
 const G = {
@@ -73,10 +61,10 @@ function TxnCard({ txn, users }) {
       animation: "fadeSlide 0.3s ease",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-        <Avatar user={from} size={28} />
+        <Avatar user={from || { avatar: "?" }} size={28} />
         <span style={{ color: G.gold, fontFamily: G.font, fontSize: 13, fontWeight: 600 }}>{from?.displayName}</span>
         <span style={{ color: G.muted, fontSize: 12 }}>{"\u2192"}</span>
-        <Avatar user={to} size={28} />
+        <Avatar user={to || { avatar: "?" }} size={28} />
         <span style={{ color: G.text, fontFamily: G.font, fontSize: 13, fontWeight: 600 }}>{to?.displayName}</span>
         <ScoreBadge score={txn.points} size={15} />
         <span style={{ color: G.muted, fontSize: 11, marginLeft: "auto" }}>{ago}</span>
@@ -117,21 +105,40 @@ function Leaderboard({ users }) {
 }
 
 function GivePointsModal({ currentUser, users, onSubmit, onClose }) {
-  const [toId, setToId]     = useState("");
-  const [pts, setPts]       = useState(1);
-  const [reason, setReason] = useState("");
-  const [err, setErr]       = useState("");
+  const [toId, setToId]       = useState("");
+  const [pts, setPts]         = useState(1);
+  const [reason, setReason]   = useState("");
+  const [err, setErr]         = useState("");
+  const [budget, setBudget]   = useState(null);
+  const [loading, setLoading] = useState(false);
 
   const targets = users.filter(u =>
     u.id !== currentUser.id &&
     (u.type === "user" || (u.type === "proxy" && u.controlledBy?.includes(currentUser.id)))
   );
 
-  const handle = () => {
+  useEffect(() => {
+    if (!toId) { setBudget(null); return; }
+    api.get(`/budget/${toId}`).then(setBudget).catch(() => setBudget(null));
+  }, [toId]);
+
+  const handle = async () => {
     if (!toId) return setErr("Pick someone.");
-    if (!pts || pts === 0) return setErr("Points can't be zero.");
-    onSubmit({ toId, points: parseInt(pts), reason });
-    onClose();
+    const p = parseInt(pts);
+    if (!p || p === 0) return setErr("Points can't be zero.");
+    if (budget && Math.abs(p) > budget.remaining) {
+      return setErr(`You only have ${budget.remaining} points left for this person today.`);
+    }
+    setLoading(true);
+    setErr("");
+    try {
+      await onSubmit({ toId: parseInt(toId), points: p, reason });
+      onClose();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const inputStyle = {
@@ -160,11 +167,17 @@ function GivePointsModal({ currentUser, users, onSubmit, onClose }) {
             <option value="">{"\u2014"} select {"\u2014"}</option>
             {targets.map(u => <option key={u.id} value={u.id}>{u.displayName}{u.type==="proxy"?" (proxy)":""}</option>)}
           </select>
+          {budget && (
+            <div style={{ color: budget.remaining > 0 ? G.muted : G.red, fontSize: 11, marginTop: 4 }}>
+              {budget.remaining}/10 points remaining today
+            </div>
+          )}
         </div>
 
         <div style={{ marginBottom: 14 }}>
           <label style={{ color: G.muted, fontSize: 11, fontFamily: G.font, display: "block", marginBottom: 6 }}>POINTS (negative = bad)</label>
           <input type="number" value={pts} onChange={e=>setPts(e.target.value)}
+            min={budget ? -budget.remaining : -10} max={budget ? budget.remaining : 10}
             style={inputStyle} placeholder="e.g. +5 or -3" />
         </div>
 
@@ -182,24 +195,24 @@ function GivePointsModal({ currentUser, users, onSubmit, onClose }) {
             border: `1px solid ${G.border}`, borderRadius: 10, color: G.muted,
             fontFamily: G.font, fontSize: 14, cursor: "pointer",
           }}>Cancel</button>
-          <button onClick={handle} style={{
-            flex: 2, padding: "12px", background: G.gold,
+          <button onClick={handle} disabled={loading} style={{
+            flex: 2, padding: "12px", background: loading ? G.goldDim : G.gold,
             border: "none", borderRadius: 10, color: "#000",
-            fontFamily: G.font, fontSize: 14, fontWeight: 700, cursor: "pointer",
-          }}>Send {"\u26A1"}</button>
+            fontFamily: G.font, fontSize: 14, fontWeight: 700, cursor: loading ? "wait" : "pointer",
+          }}>{loading ? "Sending..." : "Send \u26A1"}</button>
         </div>
       </div>
     </div>
   );
 }
 
-function AddAccountModal({ currentUser, onSubmit, onClose }) {
+function AddProxyModal({ onSubmit, onClose }) {
   const [displayName, setDisplayName] = useState("");
   const [username, setUsername]       = useState("");
-  const [avatar, setAvatar]           = useState("\u{1F464}");
-  const [type, setType]               = useState("user");
-  const [password, setPassword]       = useState("");
-  const emojis = ["\u{1F464}","\u{1F431}","\u{1F436}","\u{1F438}","\u{1F916}","\u{1F47E}","\u{1F338}","\u{1F3B8}","\u{1F9F8}","\u{1F98A}","\u{1F43C}","\u{1F300}"];
+  const [avatar, setAvatar]           = useState("\u{1F431}");
+  const [err, setErr]                 = useState("");
+  const [loading, setLoading]         = useState(false);
+  const emojis = ["\u{1F431}","\u{1F436}","\u{1F438}","\u{1F916}","\u{1F47E}","\u{1F338}","\u{1F3B8}","\u{1F9F8}","\u{1F98A}","\u{1F43C}","\u{1F300}","\u{1F480}"];
 
   const inputStyle = {
     width: "100%", background: G.surface, border: `1px solid ${G.border}`,
@@ -207,17 +220,18 @@ function AddAccountModal({ currentUser, onSubmit, onClose }) {
     fontFamily: G.font, fontSize: 14, boxSizing: "border-box", outline: "none",
   };
 
-  const handle = () => {
-    if (!displayName.trim() || !username.trim()) return;
-    onSubmit({
-      id: `u${Date.now()}`,
-      username: username.toLowerCase().trim(),
-      displayName: displayName.trim(),
-      password: type === "user" ? password : null,
-      score: 0, avatar, type,
-      controlledBy: type === "proxy" ? [currentUser.id] : null,
-    });
-    onClose();
+  const handle = async () => {
+    if (!displayName.trim() || !username.trim()) return setErr("Fill in all fields.");
+    setLoading(true);
+    setErr("");
+    try {
+      await onSubmit({ username: username.toLowerCase().trim(), displayName: displayName.trim(), avatar });
+      onClose();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -231,7 +245,10 @@ function AddAccountModal({ currentUser, onSubmit, onClose }) {
         maxWidth: 480, animation: "slideUp 0.25s ease",
       }} onClick={e => e.stopPropagation()}>
         <div style={{ fontFamily: G.font, fontSize: 18, fontWeight: 700, color: G.gold, marginBottom: 20 }}>
-          {"\u2795"} ADD ACCOUNT
+          {"\u{1F3AD}"} ADD PROXY ACCOUNT
+        </div>
+        <div style={{ color: G.muted, fontSize: 12, marginBottom: 16 }}>
+          For pets, NPCs, or people who don't have an account. You control this account.
         </div>
 
         <div style={{ marginBottom: 14 }}>
@@ -249,7 +266,7 @@ function AddAccountModal({ currentUser, onSubmit, onClose }) {
 
         <div style={{ marginBottom: 14 }}>
           <label style={{ color: G.muted, fontSize: 11, fontFamily: G.font, display: "block", marginBottom: 6 }}>DISPLAY NAME</label>
-          <input value={displayName} onChange={e=>setDisplayName(e.target.value)} style={inputStyle} placeholder="Basil" />
+          <input value={displayName} onChange={e=>setDisplayName(e.target.value)} style={inputStyle} placeholder="Basil the Cat" />
         </div>
 
         <div style={{ marginBottom: 14 }}>
@@ -257,25 +274,7 @@ function AddAccountModal({ currentUser, onSubmit, onClose }) {
           <input value={username} onChange={e=>setUsername(e.target.value)} style={inputStyle} placeholder="basil" />
         </div>
 
-        <div style={{ marginBottom: 14 }}>
-          <label style={{ color: G.muted, fontSize: 11, fontFamily: G.font, display: "block", marginBottom: 6 }}>TYPE</label>
-          <div style={{ display: "flex", gap: 8 }}>
-            {["user","proxy"].map(t => (
-              <button key={t} onClick={()=>setType(t)} style={{
-                flex: 1, padding: "10px", background: type===t ? G.gold+"22" : G.card,
-                border: `1px solid ${type===t ? G.gold : G.border}`, borderRadius: 8,
-                color: type===t ? G.gold : G.muted, fontFamily: G.font, fontSize: 13, cursor: "pointer",
-              }}>{t === "user" ? "\u{1F464} Real Person" : "\u{1F3AD} Proxy (you control)"}</button>
-            ))}
-          </div>
-        </div>
-
-        {type === "user" && (
-          <div style={{ marginBottom: 14 }}>
-            <label style={{ color: G.muted, fontSize: 11, fontFamily: G.font, display: "block", marginBottom: 6 }}>PASSWORD</label>
-            <input type="password" value={password} onChange={e=>setPassword(e.target.value)} style={inputStyle} placeholder="they'll need this to log in" />
-          </div>
-        )}
+        {err && <div style={{ color: G.red, fontSize: 12, marginBottom: 12 }}>{err}</div>}
 
         <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
           <button onClick={onClose} style={{
@@ -283,28 +282,37 @@ function AddAccountModal({ currentUser, onSubmit, onClose }) {
             border: `1px solid ${G.border}`, borderRadius: 10, color: G.muted,
             fontFamily: G.font, fontSize: 14, cursor: "pointer",
           }}>Cancel</button>
-          <button onClick={handle} style={{
-            flex: 2, padding: "12px", background: G.gold,
+          <button onClick={handle} disabled={loading} style={{
+            flex: 2, padding: "12px", background: loading ? G.goldDim : G.gold,
             border: "none", borderRadius: 10, color: "#000",
-            fontFamily: G.font, fontSize: 14, fontWeight: 700, cursor: "pointer",
-          }}>Create</button>
+            fontFamily: G.font, fontSize: 14, fontWeight: 700, cursor: loading ? "wait" : "pointer",
+          }}>{loading ? "Creating..." : "Create"}</button>
         </div>
       </div>
     </div>
   );
 }
 
-// ─── Login Screen ─────────────────────────────────────────────────────────────
-function LoginScreen({ users, onLogin }) {
+// ─── Auth Screens ─────────────────────────────────────────────────────────────
+
+function LoginScreen({ onLogin, onSwitchToRegister }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [err, setErr]           = useState("");
+  const [loading, setLoading]   = useState(false);
 
-  const handle = () => {
-    const u = users.find(x => x.username === username.toLowerCase().trim() && x.type === "user");
-    if (!u) return setErr("User not found.");
-    if (u.password && u.password !== password) return setErr("Wrong password.");
-    onLogin(u);
+  const handle = async () => {
+    setLoading(true);
+    setErr("");
+    try {
+      const data = await api.post("/login", { username, password });
+      setToken(data.token);
+      onLogin(mapUser(data.user));
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const inputStyle = {
@@ -334,14 +342,116 @@ function LoginScreen({ users, onLogin }) {
           style={inputStyle} placeholder="password"
           onKeyDown={e=>e.key==="Enter"&&handle()} />
         {err && <div style={{ color: G.red, fontSize: 12, marginBottom: 10 }}>{err}</div>}
-        <button onClick={handle} style={{
-          width: "100%", padding: "14px", background: G.gold,
+        <button onClick={handle} disabled={loading} style={{
+          width: "100%", padding: "14px", background: loading ? G.goldDim : G.gold,
           border: "none", borderRadius: 10, color: "#000",
-          fontFamily: G.font, fontSize: 16, fontWeight: 700, cursor: "pointer",
-        }}>LOG IN</button>
+          fontFamily: G.font, fontSize: 16, fontWeight: 700, cursor: loading ? "wait" : "pointer",
+        }}>{loading ? "LOGGING IN..." : "LOG IN"}</button>
 
-        <div style={{ marginTop: 24, color: G.muted, fontSize: 11, textAlign: "center" }}>
-          demo: giovanni / pass
+        <div style={{ marginTop: 24, textAlign: "center" }}>
+          <button onClick={onSwitchToRegister} style={{
+            background: "transparent", border: `1px solid ${G.border}`,
+            borderRadius: 10, padding: "10px 24px", color: G.muted,
+            fontFamily: G.font, fontSize: 13, cursor: "pointer",
+          }}>New here? Register</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RegisterScreen({ onRegister, onSwitchToLogin }) {
+  const [username, setUsername]     = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [password, setPassword]    = useState("");
+  const [avatar, setAvatar]         = useState("\u{1F464}");
+  const [catName, setCatName]       = useState("");
+  const [err, setErr]               = useState("");
+  const [loading, setLoading]       = useState(false);
+
+  const emojis = ["\u{1F464}","\u{1F431}","\u{1F436}","\u{1F438}","\u{1F916}","\u{1F47E}","\u{1F338}","\u{1F3B8}","\u{1F9F8}","\u{1F98A}","\u{1F43C}","\u{1F300}"];
+
+  const handle = async () => {
+    setLoading(true);
+    setErr("");
+    try {
+      const data = await api.post("/register", { username, displayName, password, avatar, catName });
+      setToken(data.token);
+      onRegister(mapUser(data.user));
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const inputStyle = {
+    width: "100%", background: "#1c1c1c", border: `1px solid ${G.border}`,
+    borderRadius: 10, padding: "14px 16px", color: G.text,
+    fontFamily: G.font, fontSize: 15, boxSizing: "border-box",
+    outline: "none", marginBottom: 12,
+  };
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: G.bg,
+      display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center",
+      padding: 24, fontFamily: G.font,
+    }}>
+      <div style={{ marginBottom: 24, textAlign: "center" }}>
+        <div style={{ fontSize: 36, marginBottom: 4 }}>{"\u26A1"}</div>
+        <div style={{ fontSize: 28, fontWeight: 900, color: G.gold, letterSpacing: "-2px" }}>JOIN CLOUT</div>
+        <div style={{ fontSize: 11, color: G.muted, letterSpacing: "2px", marginTop: 4 }}>PROVE YOU'RE A REAL ONE</div>
+      </div>
+
+      <div style={{ width: "100%", maxWidth: 360 }}>
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ color: G.muted, fontSize: 11, fontFamily: G.font, display: "block", marginBottom: 6 }}>AVATAR</label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+            {emojis.map(e => (
+              <button key={e} onClick={()=>setAvatar(e)} style={{
+                fontSize: 20, background: avatar===e ? G.gold+"33" : G.card,
+                border: `1px solid ${avatar===e ? G.gold : G.border}`,
+                borderRadius: 8, padding: "5px 9px", cursor: "pointer",
+              }}>{e}</button>
+            ))}
+          </div>
+        </div>
+
+        <input value={displayName} onChange={e=>setDisplayName(e.target.value)}
+          style={inputStyle} placeholder="display name (e.g. Giovanni)" />
+        <input value={username} onChange={e=>setUsername(e.target.value)}
+          style={inputStyle} placeholder="username (lowercase)" autoCapitalize="none" />
+        <input type="password" value={password} onChange={e=>setPassword(e.target.value)}
+          style={inputStyle} placeholder="password" />
+
+        <div style={{
+          background: G.card, border: `1px solid ${G.goldDim}`,
+          borderRadius: 10, padding: "14px 16px", marginBottom: 12,
+        }}>
+          <label style={{ color: G.gold, fontSize: 12, fontFamily: G.font, display: "block", marginBottom: 8 }}>
+            {"\u{1F431}"} What is my cat's name?
+          </label>
+          <input value={catName} onChange={e=>setCatName(e.target.value)}
+            style={{ ...inputStyle, marginBottom: 0, background: G.surface }}
+            placeholder="you gotta know this to join"
+            onKeyDown={e=>e.key==="Enter"&&handle()} />
+        </div>
+
+        {err && <div style={{ color: G.red, fontSize: 12, marginBottom: 10 }}>{err}</div>}
+        <button onClick={handle} disabled={loading} style={{
+          width: "100%", padding: "14px", background: loading ? G.goldDim : G.gold,
+          border: "none", borderRadius: 10, color: "#000",
+          fontFamily: G.font, fontSize: 16, fontWeight: 700, cursor: loading ? "wait" : "pointer",
+        }}>{loading ? "CREATING..." : "CREATE ACCOUNT"}</button>
+
+        <div style={{ marginTop: 24, textAlign: "center" }}>
+          <button onClick={onSwitchToLogin} style={{
+            background: "transparent", border: `1px solid ${G.border}`,
+            borderRadius: 10, padding: "10px 24px", color: G.muted,
+            fontFamily: G.font, fontSize: 13, cursor: "pointer",
+          }}>Already have an account? Log in</button>
         </div>
       </div>
     </div>
@@ -350,15 +460,74 @@ function LoginScreen({ users, onLogin }) {
 
 // ─── Main App ────────────────────────────────────────────────────────────────
 export default function App() {
-  const [users, setUsers]             = useState(() => load("clout_users", SEED_USERS));
-  const [txns, setTxns]               = useState(() => load("clout_txns", SEED_TXN));
+  const [users, setUsers]             = useState([]);
+  const [txns, setTxns]               = useState([]);
   const [currentUser, setCurrentUser] = useState(null);
   const [tab, setTab]                 = useState("feed");
   const [showGive, setShowGive]       = useState(false);
-  const [showAdd, setShowAdd]         = useState(false);
+  const [showProxy, setShowProxy]     = useState(false);
+  const [authScreen, setAuthScreen]   = useState("login"); // "login" | "register"
+  const [booting, setBooting]         = useState(true);
 
-  useEffect(() => { save("clout_users", users); }, [users]);
-  useEffect(() => { save("clout_txns", txns); }, [txns]);
+  const logout = useCallback(() => {
+    clearToken();
+    setCurrentUser(null);
+    setUsers([]);
+    setTxns([]);
+  }, []);
+
+  // Set up auth error handler
+  useEffect(() => { setAuthErrorHandler(logout); }, [logout]);
+
+  // Boot: check existing token
+  useEffect(() => {
+    const token = getToken();
+    if (!token) { setBooting(false); return; }
+    api.get("/me")
+      .then(data => setCurrentUser(mapUser(data.user)))
+      .catch(() => clearToken())
+      .finally(() => setBooting(false));
+  }, []);
+
+  // Load initial data when logged in
+  useEffect(() => {
+    if (!currentUser) return;
+    Promise.all([api.get("/users"), api.get("/txns")])
+      .then(([u, t]) => {
+        setUsers(u.users.map(mapUser));
+        setTxns(t.txns.map(mapTxn));
+      })
+      .catch(() => {});
+  }, [currentUser]);
+
+  // Polling sync
+  useEffect(() => {
+    if (!currentUser) return;
+    let lastSync = Date.now();
+    const interval = setInterval(async () => {
+      try {
+        const data = await api.get(`/sync?since=${lastSync}`);
+        lastSync = data.serverTime;
+        if (data.users.length) {
+          const mapped = data.users.map(mapUser);
+          setUsers(prev => {
+            const m = new Map(prev.map(u => [u.id, u]));
+            mapped.forEach(u => m.set(u.id, u));
+            return [...m.values()];
+          });
+        }
+        if (data.txns.length) {
+          const mapped = data.txns.map(mapTxn);
+          setTxns(prev => {
+            const ids = new Set(prev.map(t => t.id));
+            const fresh = mapped.filter(t => !ids.has(t.id));
+            return [...fresh, ...prev];
+          });
+        }
+      } catch { /* ignore sync errors */ }
+    }, 7000);
+    return () => clearInterval(interval);
+  }, [currentUser]);
 
   // Keep currentUser in sync with users state
   useEffect(() => {
@@ -370,17 +539,40 @@ export default function App() {
     }
   }, [users, currentUser]);
 
-  const handleGivePoints = ({ toId, points, reason }) => {
-    const newTxn = { id: `t${Date.now()}`, fromId: currentUser.id, toId, points, reason, ts: Date.now() };
+  const handleGivePoints = async ({ toId, points, reason }) => {
+    const data = await api.post("/txns", { toId, points, reason });
+    const newTxn = mapTxn(data.txn);
+    const updatedTarget = mapUser(data.updatedUser);
     setTxns(prev => [newTxn, ...prev]);
-    setUsers(prev => prev.map(u => u.id === toId ? { ...u, score: u.score + points } : u));
+    setUsers(prev => prev.map(u => u.id === updatedTarget.id ? updatedTarget : u));
   };
 
-  const handleAddAccount = (newUser) => {
-    setUsers(prev => [...prev, newUser]);
+  const handleAddProxy = async ({ username, displayName, avatar }) => {
+    const data = await api.post("/users/proxy", { username, displayName, avatar });
+    setUsers(prev => [...prev, mapUser(data.user)]);
   };
 
-  if (!currentUser) return <LoginScreen users={users} onLogin={setCurrentUser} />;
+  const handleAuth = (user) => {
+    setCurrentUser(user);
+  };
+
+  if (booting) {
+    return (
+      <div style={{
+        minHeight: "100vh", background: G.bg,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontFamily: G.font, color: G.muted,
+      }}>
+        {"\u26A1"}
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return authScreen === "register"
+      ? <RegisterScreen onRegister={handleAuth} onSwitchToLogin={() => setAuthScreen("login")} />
+      : <LoginScreen onLogin={handleAuth} onSwitchToRegister={() => setAuthScreen("register")} />;
+  }
 
   const myTxns = txns.filter(t => t.toId === currentUser.id || t.fromId === currentUser.id);
 
@@ -409,7 +601,7 @@ export default function App() {
             <div style={{ fontSize: 13, color: G.text, fontWeight: 600 }}>{currentUser.displayName}</div>
             <ScoreBadge score={currentUser.score} size={12} />
           </div>
-          <button onClick={() => setCurrentUser(null)} style={{
+          <button onClick={logout} style={{
             background: "transparent", border: `1px solid ${G.border}`,
             borderRadius: 6, padding: "4px 8px", color: G.muted, fontSize: 11,
             fontFamily: G.font, cursor: "pointer", marginLeft: 4,
@@ -462,13 +654,13 @@ export default function App() {
               : myTxns.map(t => <TxnCard key={t.id} txn={t} users={users} />)
             }
 
-            <button onClick={() => setShowAdd(true)} style={{
+            <button onClick={() => setShowProxy(true)} style={{
               width: "100%", marginTop: 16, padding: "12px",
               background: "transparent", border: `1px dashed ${G.border}`,
               borderRadius: 10, color: G.muted, fontFamily: G.font,
               fontSize: 13, cursor: "pointer",
             }}>
-              {"\u2795"} Add Account (proxy or friend)
+              {"\u{1F3AD}"} Add Proxy Account (pet, NPC, etc.)
             </button>
           </>
         )}
@@ -493,11 +685,10 @@ export default function App() {
           onClose={() => setShowGive(false)}
         />
       )}
-      {showAdd && (
-        <AddAccountModal
-          currentUser={currentUser}
-          onSubmit={handleAddAccount}
-          onClose={() => setShowAdd(false)}
+      {showProxy && (
+        <AddProxyModal
+          onSubmit={handleAddProxy}
+          onClose={() => setShowProxy(false)}
         />
       )}
 

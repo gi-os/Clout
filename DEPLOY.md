@@ -2,7 +2,7 @@
 
 ## Overview
 
-This guide covers hosting CLOUT on your own server and exposing it to the internet via a Cloudflare Tunnel. No need to open ports on your router or mess with port forwarding.
+CLOUT is a real multi-user app with an Express backend and SQLite database. This guide covers hosting it on your own server and exposing it via Cloudflare Tunnel.
 
 **What you need:**
 - A server (Raspberry Pi, old laptop, VPS, anything running Linux)
@@ -35,58 +35,28 @@ npm install
 npm run build
 ```
 
-This creates a `dist/` folder with static files. That's your entire app.
-
-### 3. Serve It
-
-**Option A: Simple (serve package)**
+### 3. Configure
 
 ```bash
-npm install -g serve
-serve -s dist -l 3000
+cp .env.example .env
+nano .env
 ```
 
-**Option B: Nginx (recommended for production)**
+Set these values:
+- `JWT_SECRET` — change to a long random string (e.g. `openssl rand -hex 32`)
+- `CAT_NAME` — the gatekeeper answer for registration (default: `Basil`)
+- `PORT` — server port (default: `3001`)
+- `DB_PATH` — database file location (default: `./data/clout.db`)
+
+### 4. Start the Server
 
 ```bash
-sudo apt install -y nginx
+npm start
 ```
 
-Create the config:
+This starts Express which serves both the API and the built frontend on one port. The SQLite database auto-creates at `./data/clout.db`.
 
-```bash
-sudo tee /etc/nginx/sites-available/clout << 'CONF'
-server {
-    listen 3000;
-    server_name _;
-    root /home/<YOUR_USER>/clout/dist;
-    index index.html;
-
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # Cache static assets
-    location /assets/ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-}
-CONF
-```
-
-Enable and start:
-
-```bash
-sudo ln -sf /etc/nginx/sites-available/clout /etc/nginx/sites-enabled/
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t
-sudo systemctl restart nginx
-```
-
-### 4. Keep It Running (systemd)
-
-If using `serve`, create a service so it survives reboots:
+### 5. Keep It Running (systemd)
 
 ```bash
 sudo tee /etc/systemd/system/clout.service << 'UNIT'
@@ -98,9 +68,10 @@ After=network.target
 Type=simple
 User=<YOUR_USER>
 WorkingDirectory=/home/<YOUR_USER>/clout
-ExecStart=/usr/bin/npx serve -s dist -l 3000
+ExecStart=/usr/bin/node server/index.js
 Restart=always
 RestartSec=5
+EnvironmentFile=/home/<YOUR_USER>/clout/.env
 
 [Install]
 WantedBy=multi-user.target
@@ -113,10 +84,10 @@ sudo systemctl enable clout
 sudo systemctl start clout
 ```
 
-Verify it's running:
+Verify:
 
 ```bash
-curl http://localhost:3000
+curl http://localhost:3001
 ```
 
 ---
@@ -133,10 +104,6 @@ curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/
 echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
 sudo apt update
 sudo apt install -y cloudflared
-
-# Or download directly
-# curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o cloudflared.deb
-# sudo dpkg -i cloudflared.deb
 ```
 
 ### 2. Authenticate
@@ -145,7 +112,7 @@ sudo apt install -y cloudflared
 cloudflared tunnel login
 ```
 
-This opens a browser. Pick the domain you want to use. It saves a cert to `~/.cloudflared/`.
+This opens a browser. Pick the domain you want to use.
 
 ### 3. Create the Tunnel
 
@@ -153,7 +120,7 @@ This opens a browser. Pick the domain you want to use. It saves a cert to `~/.cl
 cloudflared tunnel create clout
 ```
 
-Note the **Tunnel ID** it prints (e.g. `a1b2c3d4-...`).
+Note the **Tunnel ID** it prints.
 
 ### 4. Configure the Tunnel
 
@@ -166,15 +133,12 @@ credentials-file: /home/<YOUR_USER>/.cloudflared/<TUNNEL_ID>.json
 
 ingress:
   - hostname: clout.yourdomain.com
-    service: http://localhost:3000
+    service: http://localhost:3001
   - service: http_status:404
 YML
 ```
 
-Replace:
-- `<TUNNEL_ID>` with your tunnel ID
-- `<YOUR_USER>` with your Linux username
-- `clout.yourdomain.com` with your actual subdomain
+Replace `<TUNNEL_ID>`, `<YOUR_USER>`, and `clout.yourdomain.com` with your values.
 
 ### 5. Add DNS Record
 
@@ -182,11 +146,7 @@ Replace:
 cloudflared tunnel route dns clout clout.yourdomain.com
 ```
 
-This creates a CNAME record in Cloudflare pointing to your tunnel.
-
 ### 6. Run the Tunnel
-
-Test it first:
 
 ```bash
 cloudflared tunnel run clout
@@ -202,26 +162,16 @@ sudo systemctl enable cloudflared
 sudo systemctl start cloudflared
 ```
 
-Verify:
-
-```bash
-sudo systemctl status cloudflared
-```
-
 ---
 
 ## Part 3: Updating the App
-
-When you make changes:
 
 ```bash
 cd ~/clout
 git pull
 npm install
 npm run build
-# If using serve, restart the service:
 sudo systemctl restart clout
-# If using nginx, just rebuild — nginx serves static files directly
 ```
 
 ---
@@ -236,23 +186,23 @@ sudo systemctl restart clout
 | Tunnel status | `sudo systemctl status cloudflared` |
 | Tunnel logs | `journalctl -u cloudflared -f` |
 | Rebuild | `npm run build` |
-| Check locally | `curl http://localhost:3000` |
+| Check locally | `curl http://localhost:3001` |
 
 ---
 
 ## Troubleshooting
 
 **App not loading?**
-- Check `curl http://localhost:3000` on the server first
-- If that works but the tunnel doesn't, check `sudo systemctl status cloudflared`
+- Check `curl http://localhost:3001` on the server
+- Check `sudo systemctl status clout`
 
 **Tunnel says "connection refused"?**
-- Make sure the app is actually running on port 3000
-- Check the port in `config.yml` matches
+- Make sure the app is running on port 3001
+- Check the port in `config.yml` matches your `.env`
 
-**DNS not resolving?**
-- Verify the CNAME exists: `dig clout.yourdomain.com`
-- Can take a few minutes to propagate
+**Database issues?**
+- Database lives at `./data/clout.db` by default
+- To reset: stop the server, delete `data/clout.db`, restart
 
-**Want HTTPS?**
-- Cloudflare Tunnel handles this automatically. Your visitors get HTTPS for free.
+**HTTPS?**
+- Cloudflare Tunnel handles this automatically. Free HTTPS.
